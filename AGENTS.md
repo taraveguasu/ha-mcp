@@ -63,11 +63,12 @@ Custom agent workflows are located in `.claude/agents/`:
 
 ## Project Overview
 
-**Home Assistant MCP Server** - A production MCP server enabling AI assistants to control Home Assistant smart homes. Provides 92+ tools for entity control, automations, device management, and more.
+**Home Assistant MCP Server** - A production MCP server enabling AI assistants to control Home Assistant smart homes. Provides 90+ tools for entity control, automations, device management, and more.
 
 - **Repo**: `homeassistant-ai/ha-mcp`
 - **Package**: `ha-mcp` on PyPI
 - **Python**: 3.13 only
+- **Current version**: 7.3.0
 
 ## External Documentation
 
@@ -81,6 +82,23 @@ When implementing features or debugging, consult these resources:
 | **HA Add-on Development** | https://developers.home-assistant.io/docs/add-ons | Add-on packaging, config.yaml |
 | **FastMCP Documentation** | https://gofastmcp.com/getting-started/welcome | MCP server framework |
 | **MCP Specification** | https://modelcontextprotocol.io/docs | Protocol details |
+
+## GitHub Interactions
+
+**Use `mcp__github__` MCP tools** (not the `gh` CLI) for all GitHub operations in this session. These are the MCP server tools exposed by the GitHub MCP server. Use `ToolSearch` to find the exact tool schema before calling.
+
+The repository scope is restricted to `taraveguasu/ha-mcp`. All GitHub interactions go through `mcp__github__` tools.
+
+```
+mcp__github__add_issue_comment    # Post PR/issue comments
+mcp__github__list_issues          # List open issues
+mcp__github__list_pull_requests   # List PRs
+mcp__github__pull_request_read    # Read PR details
+mcp__github__create_pull_request  # Create draft PR
+mcp__github__push_files           # Push file changes
+mcp__github__get_file_contents    # Read file from GitHub
+mcp__github__search_code          # Search code in repo
+```
 
 ## Issue & PR Management
 
@@ -302,6 +320,8 @@ Improve code incrementally when touching it — especially tool docstrings and t
 |----------|---------|---------|
 | `pr.yml` | PR opened | Lint, type check |
 | `e2e-tests.yml` | PR to master | Full E2E tests (~3 min) |
+| `test.yml` | Push/PR | Unit tests |
+| `performance-tests.yml` | PR to master | Performance benchmarks |
 | `publish-dev.yml` | Push to master | Dev release `.devN` |
 | `notify-dev-channel.yml` | Push to master (src/) | Comment on PRs/issues with dev testing instructions |
 | `semver-release.yml` | Biweekly Wed 10:00 UTC | Stable release |
@@ -309,13 +329,17 @@ Improve code incrementally when touching it — especially tool docstrings and t
 | `build-binary.yml` | Release | Linux/macOS/Windows binaries |
 | `addon-publish.yml` | Release | HA add-on update |
 | `sync-tool-docs.yml` | Push to master (`src/ha_mcp/tools/`, `scripts/extract_tools.py`) | Regenerate `tools.json`, README, DOCS.md |
+| `pr-validate-hotfix.yml` | PR opened | Validate hotfix branch base |
+| `test-installer-scripts.yml` | Push/PR | Test install scripts |
+| `renovate.yml` | Schedule | Dependency updates via Renovate |
+| `gemini-triage.yml` | Issue opened | Automated Gemini issue triage |
 
 ## Development Commands
 
 ### Setup
 ```bash
 uv sync --group dev        # Install with dev dependencies
-uv run ha-mcp              # Run MCP server (92+ tools)
+uv run ha-mcp              # Run MCP server in stdio mode
 cp .env.example .env       # Configure HA connection
 ```
 
@@ -373,40 +397,107 @@ docker run -d -p 8086:8086 -e HOMEASSISTANT_URL=... -e HOMEASSISTANT_TOKEN=... g
 
 ```
 src/ha_mcp/
-├── server.py          # Main server with FastMCP
-├── __main__.py        # Entrypoint (CLI handlers)
-├── config.py          # Pydantic settings management
-├── errors.py          # 38 structured error codes
+├── server.py          # HomeAssistantSmartMCPServer (FastMCP wrapper)
+├── __main__.py        # CLI entrypoints: main/main_web/main_sse/main_oauth
+├── config.py          # Pydantic settings (env var management)
+├── errors.py          # 38 structured ErrorCode enum + helpers
+├── auth/
+│   ├── provider.py          # HomeAssistantOAuthProvider
+│   └── consent_form.py      # OAuth consent form UI
 ├── client/
-│   ├── rest_client.py       # HTTP REST API client
+│   ├── rest_client.py       # HTTP REST API client (httpx-based)
 │   ├── websocket_client.py  # Real-time state monitoring
 │   └── websocket_listener.py
-├── tools/             # 28 modules, 92+ tools
-│   ├── registry.py          # Lazy auto-discovery
-│   ├── smart_search.py      # Fuzzy entity search
-│   ├── device_control.py    # WebSocket-verified control
-│   ├── tools_*.py           # Domain-specific tools
-│   └── util_helpers.py      # Shared utilities
+├── tools/             # 35+ modules, 90+ tools
+│   ├── registry.py          # Lazy auto-discovery (finds tools_*.py)
+│   ├── smart_search.py      # Fuzzy entity search (ha_search_entities etc.)
+│   ├── device_control.py    # WebSocket-verified device control
+│   ├── backup.py            # Backup tools (explicit module, non-auto)
+│   ├── helpers.py           # log_tool_usage, register_tool_methods, error helpers
+│   ├── enhanced.py          # EnhancedToolsMixin for first-call success
+│   ├── best_practice_checker.py
+│   ├── tools_*.py           # Domain-specific tool modules (auto-discovered)
+│   └── util_helpers.py      # wait_for_* polling helpers
+├── transforms/
+│   ├── __init__.py
+│   └── categorized_search.py  # CategorizedSearchTransform (BM25 tool search)
 ├── utils/
 │   ├── fuzzy_search.py      # textdistance-based matching
 │   ├── domain_handlers.py   # HA domain logic
 │   └── operation_manager.py # Async operation tracking
 └── resources/
     ├── card_types.json
-    └── dashboard_guide.md
+    ├── dashboard_guide.md
+    └── skills-vendor/        # Git submodule — bundled HA best-practice skills
+        └── skills/           # Served as skill:// MCP resources
 ```
 
 ### Key Patterns
 
-**Tools Registry**: Auto-discovers `tools_*.py` modules with `register_*_tools()` functions. No changes needed when adding new modules.
+**Tools Registry**: Auto-discovers `tools_*.py` modules with `register_*_tools()` functions. No changes needed when adding new modules. `EXPLICIT_MODULES` handles `backup.py` which doesn't follow the naming convention.
 
-**Lazy Initialization**: Server, client, and tools created on-demand for fast startup.
+**Lazy Initialization**: `HomeAssistantSmartMCPServer` creates client, smart_tools, device_tools on first access. Server startup is instant; connections made on first tool call.
 
 **Service Layer**: Business logic in `smart_search.py`, `device_control.py` separate from tool modules.
 
 **WebSocket Verification**: Device operations verified via real-time state changes.
 
 **Tool Completion Semantics**: Tools should wait for operations to complete before returning, with optional `wait` parameter for control.
+
+**Tool Search Transform**: When `ENABLE_TOOL_SEARCH=true`, `CategorizedSearchTransform` replaces the full catalog (~90 tools) with 4 proxy tools (ha_search_tools + 3 call proxies). Reduces idle context from ~46K to ~5K tokens. 10 critical tools remain pinned (always visible).
+
+**Skills System**: Best-practice skill files are bundled via `resources/skills-vendor/` (git submodule) and served as `skill://` MCP resources. Skill guidance tools (`ha_get_skill_*`) are also registered when `ENABLE_SKILLS_AS_TOOLS=true`.
+
+**OAuth Mode**: `OAuthProxyClient` forwards HA API calls using per-user tokens extracted from OAuth JWT claims. The HA URL is fixed server-side; only the token varies per user.
+
+## Transport Modes
+
+Four server entry points are available:
+
+| Command | Transport | Default Port | Use Case |
+|---------|-----------|-------------|----------|
+| `ha-mcp` | stdio | — | Claude Desktop, local MCP clients |
+| `ha-mcp-web` | HTTP (stateless) | 8086 | Web-capable MCP clients |
+| `ha-mcp-sse` | SSE | 8087 | SSE-based MCP clients |
+| `ha-mcp-oauth` | HTTP + OAuth 2.1 | 8086 | Per-user auth (claude.ai, multi-user) |
+
+**OAuth mode** requires `HOMEASSISTANT_URL` and `MCP_BASE_URL`; no `HOMEASSISTANT_TOKEN` (tokens come from user consent form).
+
+**HTTP/SSE port and path** configurable via `MCP_PORT` and `MCP_SECRET_PATH` env vars.
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HOMEASSISTANT_URL` | (required) | HA instance URL. Use `demo` token for the public demo. |
+| `HOMEASSISTANT_TOKEN` | (required) | Long-lived access token. Use `demo` to connect to the public demo server. |
+| `HA_TIMEOUT` | `30` | HTTP request timeout in seconds |
+| `HA_MAX_RETRIES` | `3` | Retry count for failed requests |
+| `FUZZY_THRESHOLD` | `60` | Fuzzy search match threshold (0-100) |
+| `ENTITY_SEARCH_LIMIT` | `20` | Default entity search result limit |
+| `BACKUP_HINT` | `normal` | Backup agent hint: `strong`, `normal`, `weak`, `auto` |
+| `ENABLE_WEBSOCKET` | `true` | Enable WebSocket for real-time state verification |
+| `ENABLE_SKILLS` | `true` | Serve bundled skills as `skill://` MCP resources |
+| `ENABLE_SKILLS_AS_TOOLS` | `true` | Expose `list_resources`/`read_resource` tools for skill access |
+| `ENABLE_TOOL_SEARCH` | `false` | Replace full catalog with BM25 search + 4 proxy tools |
+| `ENABLE_YAML_CONFIG_EDITING` | `false` | Allow `ha_config_set_yaml` to modify `configuration.yaml` |
+| `ENABLE_DASHBOARD_PARTIAL_TOOLS` | `true` | Enable `python_transform` / `find_card` dashboard tools |
+| `ENABLED_TOOL_MODULES` | `all` | Filter tool modules: `all`, `automation`, or comma-separated module names |
+| `MCP_SERVER_NAME` | `ha-mcp` | Server name in MCP protocol |
+| `MCP_PORT` | `8086` | HTTP/SSE server port |
+| `MCP_SECRET_PATH` | `/mcp` | HTTP/SSE endpoint path |
+| `MCP_BASE_URL` | (required for OAuth) | Public URL for OAuth mode (e.g., `https://your-tunnel.com`) |
+| `HAMCP_ENV_FILE` | `.env` | Alternate env file (e.g., `.env.test`) |
+| `DEBUG` | `false` | Enable debug mode |
+| `LOG_LEVEL` | `INFO` | Logging level |
+| `ENVIRONMENT` | `development` | Environment name |
+
+### Tool Filtering (`ENABLED_TOOL_MODULES`)
+
+Filter which tool modules load at startup. Useful for restricted deployments:
+- `all` — Load all tools (default)
+- `automation` — Load automation-related tools only (`tools_config_automations`, `tools_config_scripts`, `tools_traces`, `tools_blueprints`, `tools_search`)
+- Comma-separated list — Load specific modules: `tools_config_automations,tools_search`
 
 ## Writing MCP Tools
 
@@ -538,7 +629,7 @@ raise ToolError(json.dumps({...}))                   # Tool-level failure (isErr
 ### Tool Consolidation
 When a tool's functionality is fully covered by another tool, **remove** the redundant tool rather than deprecating it. Fewer tools reduces cognitive load for AI agents and improves decision-making. Do not add deprecation notices or shims — just delete the tool and update any docstring references to point to the replacement.
 
-With 92+ tools, this project exceeds the [10-20 tool threshold](https://ai.google.dev/gemini-api/docs/function-calling) where tool selection accuracy degrades ([OpenAI](https://developers.openai.com/api/docs/guides/function-calling), [Google](https://ai.google.dev/gemini-api/docs/function-calling)). Reducing tool count is a priority, but how matters. Anthropic's [tool design blog](https://www.anthropic.com/engineering/writing-tools-for-agents) recommends combining frequently chained operations: "Instead of implementing a `list_users`, `list_events`, and `create_event` tools, consider implementing a `schedule_event` tool which finds availability and schedules an event." Their [context engineering guide](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) warns against "bloated tool sets that cover too much functionality or lead to ambiguous decision points about which tool to use." Each tool should have "a clear, distinct purpose" ([Anthropic](https://www.anthropic.com/engineering/writing-tools-for-agents)).
+With 90+ tools, this project exceeds the [10-20 tool threshold](https://ai.google.dev/gemini-api/docs/function-calling) where tool selection accuracy degrades ([OpenAI](https://developers.openai.com/api/docs/guides/function-calling), [Google](https://ai.google.dev/gemini-api/docs/function-calling)). Reducing tool count is a priority, but how matters. Anthropic's [tool design blog](https://www.anthropic.com/engineering/writing-tools-for-agents) recommends combining frequently chained operations: "Instead of implementing a `list_users`, `list_events`, and `create_event` tools, consider implementing a `schedule_event` tool which finds availability and schedules an event." Their [context engineering guide](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) warns against "bloated tool sets that cover too much functionality or lead to ambiguous decision points about which tool to use." Each tool should have "a clear, distinct purpose" ([Anthropic](https://www.anthropic.com/engineering/writing-tools-for-agents)).
 
 | Pattern | Example | Guideline |
 |---------|---------|-----------|
